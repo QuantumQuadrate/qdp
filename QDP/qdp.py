@@ -181,7 +181,7 @@ class QDP:
         # set a data path to search from
         self.base_data_path = base_data_path
         # save current git hash
-        self.version = subprocess.check_output(['git', 'describe', '--always']).strip()
+        #self.version = subprocess.check_output(['git', 'describe', '--always']).strip()
 
     def apply_thresholds(self, cuts=None, exp='all', loading_shot=0):
         """Digitize data with existing thresholds (default) or with supplied thresholds.
@@ -197,13 +197,16 @@ class QDP:
             exps = self.experiments[exp]
         for e in exps:
             for i in e['iterations']:
-                meas, shots, rois = e['iterations'][i]['signal_data'].shape[:3]
+                meas, shots, rois = np.squeeze(e['iterations'][i]['signal_data']).shape[:3]
                 # digitize the data
                 quant = np.empty((shots, rois, meas))
                 for r in range(rois):
                     for s in range(shots):
                         # first bin is bin 1
-                        quant[s, r] = np.digitize(e['iterations'][i]['signal_data'][:, s, r, 0], cuts[r][s])
+                        try:
+                            quant[s, r] = np.digitize(np.squeeze(e['iterations'][i]['signal_data'])[:, s, r, 0], cuts[r][s])
+                        except:
+                            quant[s, r] = np.digitize(np.squeeze(e['iterations'][i]['signal_data'])[:, s, r], cuts[r][s])
                 e['iterations'][i]['quantized_data'] = quant.swapaxes(0, 2).swapaxes(1,2)  # to: (meas, shots, rois)
                 # calculate loading and retention for each shot
                 retention = np.empty((shots, rois))
@@ -219,11 +222,16 @@ class QDP:
                             quant[s, r]
                         ), axis=0)
                 loaded = np.copy(retention[loading_shot, :])
+               
                 retention[loading_shot, :] = 0.0
                 reloading[loading_shot, :] = 0.0
+                #print retention/loaded
                 e['iterations'][i]['loading'] = loaded/meas
                 e['iterations'][i]['retention'] = retention/loaded
-                e['iterations'][i]['retention_err'] = binomial_error(retention, loaded)
+                try:
+                    e['iterations'][i]['retention_err'] = binomial_error(retention, loaded)
+                except:
+                    e['iterations'][i]['retention_err'] = binomial_error(retention[1], loaded)
                 e['iterations'][i]['loaded'] = loaded
                 e['iterations'][i]['reloading'] = reloading.astype('float')/(meas-loaded)
 
@@ -275,11 +283,21 @@ class QDP:
         return array
 
     def get_retention(self, shot=1, fmt='dict'):
-        retention = np.empty((
+        print self.experiments[0]['iterations'][0]['signal_data'].shape[3]*self.experiments[0]['iterations'][0]['signal_data'].shape[2]
+        try:    
+            retention = np.empty((
             len(self.experiments),
             len(self.experiments[0]['iterations'].items()),
-            self.experiments[0]['iterations'][0]['signal_data'].shape[2]
+            self.experiments[0]['iterations'][0]['signal_data'].shape[3]*self.experiments[0]['iterations'][0]['signal_data'].shape[2]
+            
         ))
+        except:
+            retention = np.empty((
+            len(self.experiments),
+            len(self.experiments[0]['iterations'].items()),
+            self.experiments[0]['iterations'][0]['signal_data'].shape[2]  # rois
+        ))
+        print self.experiments[0]['iterations'][0]['signal_data'].shape
         err = np.empty_like(retention)
         ivar = np.empty_like(retention)
         loading = np.empty_like(retention)
@@ -293,15 +311,16 @@ class QDP:
             for i in exp['iterations']:
                 try:
                     retention[e, i] = exp['iterations'][i]['retention'][shot]
-                    loading[e, i] = exp['iterations'][i]['loading'][()]
+                    loading[e, i] = exp['iterations'][i]['loading']
                     err[e, i] = exp['iterations'][i]['retention_err'][shot]
                     if ivar_name is not None:
-                        ivar[e, i] = exp['iterations'][i]['variables'][ivar_name][()]
+                        ivar[e, i] = exp['iterations'][i]['variables'][ivar_name]
                     else:
                         ivar[e, i] = 0
                 except IndexError:
                     print "error reading (e,i): ({},{})".format(e, i)
         # if numpy format is requested return it
+        print retention
         if fmt == 'numpy' or fmt == 'np':
             return np.array([ivar, retention, err, loading])
         else:
@@ -452,7 +471,10 @@ class QDP:
         # copy measurement values over
         for m in h5_iter['measurements/'].iteritems():
             data = self.process_measurement(m[1], iteration_obj['variables'])
-            iteration_obj['timeseries_data'].append(data['timeseries_data'])
+            try:
+                iteration_obj['timeseries_data'].append(data['timeseries_data'])
+            except:
+                pass
             iteration_obj['signal_data'].append(data['signal_data'])
         # cast as numpy arrays, compress sub measurements
         iteration_obj['signal_data'] = np.concatenate(iteration_obj['signal_data'])
@@ -464,9 +486,27 @@ class QDP:
 
         returns numpy array of timeseries_data for each shot.
         """
-        sum_data = self.process_analyzed_counter_data(measurement, variables)
-        ts_data = self.process_raw_counter_data(measurement, variables)
+        try:
+            sum_data = self.process_analyzed_counter_data(measurement, variables)
+            ts_data = self.process_raw_counter_data(measurement, variables)
+        except:
+            sum_data = self.process_analyzed_camera_data(measurement, variables)
+            ts_data = []
         return {'timeseries_data': ts_data, 'signal_data': sum_data}
+
+    
+    def process_raw_camera_data(self, measurement, variables):
+        """Retrieve data from hdf5 measurement obj.
+
+        returns numpy array of camera_data for each shot.
+        """
+        total_shots = 0
+        array = []
+        for x in (0,1,2):
+            array.append([measurement['data/Andor_4522/shots/'+str(x)].value])
+            total_shots += 1
+       # total_shots = array.shape[1]
+        return self.format_counter_data(array, total_shots)
 
     def process_raw_counter_data(self, measurement, variables):
         """Retrieve data from hdf5 measurement obj.
@@ -481,6 +521,15 @@ class QDP:
             print("Possibly too many shots, analysis might need to be updated")
         return self.format_counter_data(array, total_shots, drop_bins, meas_bins)
 
+    def process_analyzed_camera_data(self, measurement, variables):
+        """Retrieve data from hdf5 measurement obj.
+
+        returns numpy array of camera_data for each shot.
+        """
+        # stored format is (sub_measurement, shot, roi, 1)
+        # last dimension is the "roi column", an artifact of the camera roi definition
+        return np.array([measurement['analysis/squareROIsums'].value])
+ 
     def process_analyzed_counter_data(self, measurement, variables):
         """Retrieve data from hdf5 measurement obj.
 
@@ -489,7 +538,7 @@ class QDP:
         # stored format is (sub_measurement, shot, roi, 1)
         # last dimension is the "roi column", an artifact of the camera roi definition
         return measurement['analysis/counter_data'].value
-
+ 
     def save_experiment_data(self, filename_prefix='data', path=None):
         """Saves data to files with the specified prefix."""
         if path is None:
