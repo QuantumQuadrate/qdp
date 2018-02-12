@@ -4,7 +4,6 @@ import numpy as np
 from sklearn import mixture
 from scipy import special
 from scipy import optimize
-import subprocess
 import json
 import ivar
 import datetime
@@ -23,7 +22,7 @@ def default_exp(dp):
         search_path = os.path.join(dp, exp_date)
         try:
             exp_name = os.listdir(search_path)[-1]
-        except Exception as e:
+        except:
             print "I tried my best but there is no data in today or yesterday's directories"
     return os.path.join(exp_date, exp_name, 'results.hdf5')
 
@@ -223,7 +222,7 @@ class QDP:
                             quant[s, r]
                         ), axis=0)
                 loaded = np.copy(retention[loading_shot, :])
-               
+
                 retention[loading_shot, :] = 0.0
                 reloading[loading_shot, :] = 0.0
                 #print retention/loaded
@@ -284,31 +283,38 @@ class QDP:
         return array
 
     def get_retention(self, shot=1, fmt='dict'):
-        #print self.experiments[0]['iterations'][0]['signal_data'].shape[3]*self.experiments[0]['iterations'][0]['signal_data'].shape[2]
-        try:    
+        # print self.experiments[0]['iterations'][0]['signal_data'].shape[3]*self.experiments[0]['iterations'][0]['signal_data'].shape[2]
+        try:
+            r = self.experiments[0]['iterations'][0]['signal_data'].shape[3]
+            r *= self.experiments[0]['iterations'][0]['signal_data'].shape[2]
             retention = np.empty((
-            len(self.experiments),
-            len(self.experiments[0]['iterations'].items()),
-            self.experiments[0]['iterations'][0]['signal_data'].shape[3]*self.experiments[0]['iterations'][0]['signal_data'].shape[2]
-            
-        ))
+                len(self.experiments),
+                len(self.experiments[0]['iterations'].items()),
+                r
+            ))
         except:
             retention = np.empty((
-            len(self.experiments),
-            len(self.experiments[0]['iterations'].items()),
-            self.experiments[0]['iterations'][0]['signal_data'].shape[2]  # rois
-        ))
-        #print self.experiments[0]['iterations'][0]['signal_data'].shape
+                len(self.experiments),
+                len(self.experiments[0]['iterations'].items()),
+                self.experiments[0]['iterations'][0]['signal_data'].shape[2]  # rois
+            ))
+        # print self.experiments[0]['iterations'][0]['signal_data'].shape
         err = np.empty_like(retention)
-        redX =  np.empty_like(retention)
-        FORTX =  np.empty_like(retention)
-        redY =  np.empty_like(retention)
-        FORTY =  np.empty_like(retention)
+        redX = np.empty_like(retention)
+        FORTX = np.empty_like(retention)
+        redY = np.empty_like(retention)
+        FORTY = np.empty_like(retention)
         loading = np.empty_like(retention)
         for e, exp in enumerate(self.experiments):
             if len(exp['variable_list']) > 1:
-                ivar =np.empty((len(self.experiments),len(exp['variable_list']),len(self.experiments[0]['iterations'].items()),self.experiments[0]['iterations'][0]['signal_data'].shape[3]*self.experiments[0]['iterations'][0]['signal_data'].shape[2]))
-                for j in (0,1):
+                r = self.experiments[0]['iterations'][0]['signal_data'].shape[3]
+                r *= self.experiments[0]['iterations'][0]['signal_data'].shape[2]
+                ivar = np.empty((
+                    len(self.experiments),
+                    len(exp['variable_list']),
+                    len(self.experiments[0]['iterations'].items()),
+                ))
+                for j in range(2):
                     for i in exp['iterations']:
                         ivar_name = exp['variable_list']
                         try:
@@ -320,17 +326,17 @@ class QDP:
                             loading[e, i] = exp['iterations'][i]['loading']
                             err[e, i] = exp['iterations'][i]['retention_err'][shot]
                             if ivar_name is not None:
-                           
-                                ivar[e,j, i] = exp['iterations'][i]['variables'][ivar_name[j]]
+
+                                ivar[e, j, i] = exp['iterations'][i]['variables'][ivar_name[j]]
                             else:
-                                ivar[e, i,j] = 0
+                                ivar[e, i, j] = 0
                         except IndexError:
                             print "error reading (e,i): ({},{})".format(e, i)
                     # if numpy format is requested return it
-                        #print retention
+                        # print retention
                 if fmt == 'numpy' or fmt == 'np':
                     return np.array([ivar, retention, err, loading])
-                   # print retention
+                    # print retention
                 else:
                     # if unrecognized return dict format
                     return {
@@ -365,7 +371,7 @@ class QDP:
                 except IndexError:
                     print "error reading (e,i): ({},{})".format(e, i)
         # if numpy format is requested return it
-        #print retention
+        # print retention
         if fmt == 'numpy' or fmt == 'np':
             return np.array([ivar, retention, err, loading])
         else:
@@ -536,15 +542,15 @@ class QDP:
             if np.isnan(data['FORT_camera_dataX']):
                 pass
             else:
-                 iteration_obj['FORT_camera_dataX'].append(data['FORT_camera_dataX'])
+                iteration_obj['FORT_camera_dataX'].append(data['FORT_camera_dataX'])
             if np.isnan(data['Red_camera_dataY']):
                 pass
             else:
-                 iteration_obj['Red_camera_dataY'].append(data['Red_camera_dataY'])
+                iteration_obj['Red_camera_dataY'].append(data['Red_camera_dataY'])
             if np.isnan(data['FORT_camera_dataY']):
                 pass
             else:
-                 iteration_obj['FORT_camera_dataY'].append(data['FORT_camera_dataY'])
+                iteration_obj['FORT_camera_dataY'].append(data['FORT_camera_dataY'])
         # cast as numpy arrays, compress sub measurements
         iteration_obj['signal_data'] = np.concatenate(iteration_obj['signal_data'])
         iteration_obj['Red_camera_dataX'] = np.mean(iteration_obj['Red_camera_dataX'])
@@ -563,13 +569,20 @@ class QDP:
             sum_data = self.process_analyzed_counter_data(measurement, variables)
             ts_data = self.process_raw_counter_data(measurement, variables)
         except:
+            traceback.print_exc()
             sum_data = self.process_analyzed_camera_data(measurement, variables)
             Red_data = self.process_analyzed_camera_data_Red(measurement, variables)
             FORT_data = self.process_analyzed_camera_data_FORT(measurement, variables)
             ts_data = []
-        return {'timeseries_data': ts_data, 'signal_data': sum_data, 'Red_camera_dataX': Red_data[0],'Red_camera_dataY': Red_data[1] ,'FORT_camera_dataX': FORT_data[0],'FORT_camera_dataY': FORT_data[1]}
+        return {
+            'timeseries_data': ts_data,
+            'signal_data': sum_data,
+            'Red_camera_dataX': Red_data[0],
+            'Red_camera_dataY': Red_data[1],
+            'FORT_camera_dataX': FORT_data[0],
+            'FORT_camera_dataY': FORT_data[1]
+        }
 
-    
     def process_raw_camera_data(self, measurement, variables):
         """Retrieve data from hdf5 measurement obj.
 
@@ -577,10 +590,10 @@ class QDP:
         """
         total_shots = 0
         array = []
-        for x in (0,1,2):
-            array.append([measurement['data/Andor_4522/shots/'+str(x)].value])
+        for x in range(3):
+            array.append([measurement['data/Andor_4522/shots/' + str(x)].value])
             total_shots += 1
-       # total_shots = array.shape[1]
+        # total_shots = array.shape[1]
         return self.format_counter_data(array, total_shots)
 
     def process_raw_counter_data(self, measurement, variables):
@@ -604,6 +617,7 @@ class QDP:
         # stored format is (sub_measurement, shot, roi, 1)
         # last dimension is the "roi column", an artifact of the camera roi definition
         return np.array([measurement['analysis/squareROIsums'].value])
+
     def process_analyzed_camera_data_FORT(self, measurement, variables):
         """Retrieve data from hdf5 measurement obj.
 
@@ -611,7 +625,11 @@ class QDP:
         """
         # stored format is (sub_measurement, shot, roi, 1)
         # last dimension is the "roi column", an artifact of the camera roi definition
-        return np.array([measurement['data/camera_data/15102504/stats/X0'].value,measurement['data/camera_data/15102504/stats/Y0'].value])
+        return np.array([
+            measurement['data/camera_data/15102504/stats/X0'].value,
+            measurement['data/camera_data/15102504/stats/Y0'].value
+        ])
+
     def process_analyzed_camera_data_Red(self, measurement, variables):
         """Retrieve data from hdf5 measurement obj.
 
@@ -619,9 +637,11 @@ class QDP:
         """
         # stored format is (sub_measurement, shot, roi, 1)
         # last dimension is the "roi column", an artifact of the camera roi definition
-        return np.array([measurement['data/camera_data/16483678/stats/X0'].value,measurement['data/camera_data/16483678/stats/Y0'].value])
- 
- 
+        return np.array([
+            measurement['data/camera_data/16483678/stats/X0'].value,
+            measurement['data/camera_data/16483678/stats/Y0'].value
+        ])
+
     def process_analyzed_counter_data(self, measurement, variables):
         """Retrieve data from hdf5 measurement obj.
 
@@ -630,7 +650,7 @@ class QDP:
         # stored format is (sub_measurement, shot, roi, 1)
         # last dimension is the "roi column", an artifact of the camera roi definition
         return measurement['analysis/counter_data'].value
- 
+
     def save_experiment_data(self, filename_prefix='data', path=None):
         """Saves data to files with the specified prefix."""
         if path is None:
