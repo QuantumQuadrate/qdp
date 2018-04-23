@@ -8,6 +8,7 @@ import subprocess
 import json
 import ivar
 import datetime
+from scipy.stats import poisson
 
 
 def default_exp(dp):
@@ -28,8 +29,19 @@ def default_exp(dp):
     return os.path.join(exp_date, exp_name, 'results.hdf5')
 
 
-def intersection(A1, m0, m1, s0, s1):
-    return (m1*s0**2-m0*s1**2-np.sqrt(s0**2*s1**2*(m0**2-2*m0*m1+m1**2+2*np.log((1-A1)/A1)*(s1**2-s0**2))))/(s0**2-s1**2)
+def intersection(ftype, fparams):
+    """Returns the minimum overlap of two distributions"""
+    if ftype == 'gaussian':
+        A1, m0, m1, s0, s1 = fparams
+        return (m1*s0**2-m0*s1**2-np.sqrt(s0**2*s1**2*(m0**2-2*m0*m1+m1**2+2*np.log((1-A1)/A1)*(s1**2-s0**2))))/(s0**2-s1**2)
+    if ftype == 'poissonian':
+        A1, m0, m1 = fparams
+        A1_min = 0.1  # set cuts assuming at least 10 percent loading
+        if A1 < A1_min:
+            A1 = A1_min
+        for s in range(int(m1)):
+            if (1-A1)*poisson.pmf(s, m0) < A1*poisson.pmf(s, m1):
+                return s
 
 
 def area(A1, m0, m1, s0, s1):
@@ -44,12 +56,16 @@ def overlap(xc, A1, m0, m1, s0, s1):
 
 
 # Relative Fraction in 1
-def frac(A1, m0, m1, s0, s1):
-    return A1
+def frac(fparams):
+    return fparams[0]
 
 
 def dblgauss(x, A1, m0, m1, s0, s1):
     return (1-A1)*np.exp(-(x-m0)**2 / (2*s0**2))/np.sqrt(2*np.pi*s0**2) + A1*np.exp(-(x-m1)**2 / (2*s1**2))/np.sqrt(2*np.pi*s1**2)
+
+
+def dblpoisson(x, A1, m0, m1):
+    return (1-A1)*poisson.pmf(x, m0) + A1*poisson.pmf(x, m1)
 
 
 def get_iteration_variables(h5file, iterations):
@@ -316,37 +332,47 @@ class QDP:
     def get_thresholds(self):
         return self.cuts
 
-    def fit_distribution(self, shot_data, max_atoms=1, hbins=0):
+    def fit_distribution(self, shot_data, r, s, max_atoms=1, hbins=0, guesses=None):
         cut = np.nan
-        # use a gaussian mixture model to find initial guess at signal distributions
-        gmix = mixture.GaussianMixture(n_components=max_atoms+1)
-        gmix.fit(np.array([shot_data]).transpose())
-        # order the components by the size of the signal
-        indicies = np.argsort(gmix.means_.flatten())
-        guess = []
-        for n in range(max_atoms+1):
-            idx = indicies[n]
-            guess.append([
-                gmix.weights_[idx],  # amplitudes
-                gmix.means_.flatten()[idx],  # x0s
-                np.sqrt(gmix.means_.flatten()[idx])  # sigmas
-            ])
-        # reorder the parameters, drop the 0 atom amplitude
-        guess = np.transpose(guess).flatten()[1:]
+        try:
+            guess = guesses[r][s]
+        except:
+            # use a gaussian mixture model to find initial guess at signal distributions
+            gmix = mixture.GaussianMixture(n_components=max_atoms+1)
+            gmix.fit(np.array([shot_data]).transpose())
+            # order the components by the size of the signal
+            indicies = np.argsort(gmix.means_.flatten())
+            guess = []
+            for n in range(max_atoms+1):
+                idx = indicies[n]
+#                 guess.append([
+#                     gmix.weights_[idx],  # amplitudes
+#                     gmix.means_.flatten()[idx],  # x0s
+#                     np.sqrt(gmix.means_.flatten()[idx])  # sigmas
+#                 ])
+                guess.append([
+                    gmix.weights_[idx],  # amplitudes
+                    gmix.means_.flatten()[idx]  # x0s
+                ])
+
+            # reorder the parameters, drop the 0 atom amplitude
+            guess = np.transpose(guess).flatten()[1:]
         # bin the data, default binning is just range([0,max])
         if hbins < 1:
             hbins = range(int(np.max(shot_data))+1)
         hist, bin_edges = np.histogram(shot_data, bins=hbins, normed=True)
         try:
-            popt, pcov = optimize.curve_fit(dblgauss, bin_edges[:-1], hist, p0=guess)
-            cut = [intersection(*popt)]
-            rload = frac(*popt)
+            # popt, pcov = optimize.curve_fit(dblgauss, bin_edges[:-1], hist, p0=guess)
+            popt, pcov = optimize.curve_fit(dblpoisson, bin_edges[:-1], hist, p0=guess, bounds=[(0,0,0),(1, np.inf ,np.inf)])
+            cut = [intersection('poissonian', popt)]
+            rload = frac(popt)
         except RuntimeError:
             popt = np.array([])
             pcov = np.array([])
             cut = [np.nan]  # [intersection(*guess)]
             rload = np.nan  # frac(*guess)
-        except TypeError:
+        except TypeError as e:
+            print(e)
             print("There may not be enough data for a fit. ( {} x {} )".format(len(bin_edges)-1, len(hist)))
             popt = np.array([])
             pcov = np.array([])
@@ -379,7 +405,7 @@ class QDP:
             for s in range(shots):
                 # stored format is (sub_measurement, shot, roi, 1)
                 shot_data = self.experiments[exp]['iterations'][itr]['signal_data'][:, s, r, 0]
-                ret_val[r].append(self.fit_distribution(shot_data, **kwargs))
+                ret_val[r].append(self.fit_distribution(shot_data, r, s, **kwargs))
                 cuts.append(ret_val[r][-1]['cuts'])
                 self.rload[r][s] = ret_val[r][-1]['rload']
             self.set_thresholds(cuts, roi=r)
@@ -456,7 +482,10 @@ class QDP:
             iteration_obj['signal_data'].append(data['signal_data'])
         # cast as numpy arrays, compress sub measurements
         iteration_obj['signal_data'] = np.concatenate(iteration_obj['signal_data'])
-        iteration_obj['timeseries_data'] = np.concatenate(iteration_obj['timeseries_data'])
+        try:
+            iteration_obj['timeseries_data'] = np.concatenate(iteration_obj['timeseries_data'])
+        except ValueError:
+            print("problem analyzing timeseries data in iteration.")
         return iteration_obj
 
     def process_measurement(self, measurement, variables):
