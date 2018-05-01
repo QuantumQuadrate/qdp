@@ -98,7 +98,14 @@ def binomial_error(ns, n):
             print "no loading observed"
             errs[r] = np.full_like(ns[r], np.nan)
         else:
-            errs[r] = (z/n[r].astype('float'))*np.sqrt(ns[r].astype('float')*(1.0-ns[r].astype('float')/n[r].astype('float')))
+            try:
+                errs[r] = (z/n[r].astype('float'))*np.sqrt(ns[r].astype('float')*(1.0-ns[r].astype('float')/n[r].astype('float')))
+            except:
+                print("Problem with one of the values in the error calculation")
+                if np.isnan(n[r]).any():
+                    print("Problem with n[r]")
+                if np.isnan(ns[r]).any():
+                    print("Problem with ns[r]")
     return errs
 
 
