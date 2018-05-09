@@ -206,7 +206,7 @@ class QDP:
         # save current git hash
         self.version = subprocess.check_output(['git', 'describe', '--always']).strip()
 
-    def apply_thresholds(self, cuts=None, exp='all', loading_shot=0):
+    def apply_thresholds(self, cuts=None, exp='all', loading_shot=0, exclude_rois=[]):
         """Digitize data with existing thresholds (default) or with supplied thresholds.
 
         digitization bins are right open, i.e. the condition  for x in bin i b[i-1] <= x < b[i]
@@ -227,26 +227,29 @@ class QDP:
                 # digitize the data
                 quant = np.empty((shots, rois, meas))
                 for r in range(rois):
-                    for s in range(shots):
-                        # first bin is bin 1
-                        try:
-                            quant[s, r] = np.digitize(e['iterations'][i]['signal_data'][:, s, r, 0], cuts[r][s])
-                        except:
-                            quant[s, r] = np.digitize(np.squeeze(e['iterations'][i]['signal_data'])[:, s, r], cuts[r][s])
+                    if r not in exclude_rois:
+                        for s in range(shots):
+                            # first bin is bin 1
+                            try:
+                                quant[s, r] = np.digitize(e['iterations'][i]['signal_data'][:, s, r, 0], cuts[r][s])
+                            except Exception as ee:
+                                print(ee)
+                                quant[s, r] = np.digitize(np.squeeze(e['iterations'][i]['signal_data'])[:, s, r], cuts[r][s])
                 e['iterations'][i]['quantized_data'] = quant.swapaxes(0, 2).swapaxes(1, 2)  # to: (meas, shots, rois)
                 # calculate loading and retention for each shot
                 retention = np.empty((shots, rois))
                 reloading = np.empty((shots, rois))
                 for r in range(rois):
-                    for s in range(shots):
-                        retention[s, r] = np.sum(np.logical_and(
-                            quant[loading_shot, r],
-                            quant[s, r]
-                        ), axis=0)
-                        reloading[s, r] = np.sum(np.logical_and(
-                            np.logical_not(quant[loading_shot, r]),
-                            quant[s, r]
-                        ), axis=0)
+                    if r not in exclude_rois:
+                        for s in range(shots):
+                            retention[s, r] = np.sum(np.logical_and(
+                                quant[loading_shot, r],
+                                quant[s, r]
+                            ), axis=0)
+                            reloading[s, r] = np.sum(np.logical_and(
+                                np.logical_not(quant[loading_shot, r]),
+                                quant[s, r]
+                            ), axis=0)
                 loaded = np.copy(retention[loading_shot, :])
 
                 retention[loading_shot, :] = 0.0
@@ -343,10 +346,6 @@ class QDP:
                     for i in exp['iterations']:
                         ivar_name = exp['variable_list']
                         try:
-                            redY[e, i] = exp['iterations'][i]['Red_camera_dataY']
-                            FORTY[e, i] = exp['iterations'][i]['FORT_camera_dataY']
-                            redX[e, i] = exp['iterations'][i]['Red_camera_dataX']
-                            FORTY[e, i] = exp['iterations'][i]['FORT_camera_dataX']
                             retention[e, i] = exp['iterations'][i]['retention'][shot]
                             loading[e, i] = exp['iterations'][i]['loading']
                             err[e, i] = exp['iterations'][i]['retention_err'][shot]
@@ -382,10 +381,6 @@ class QDP:
                 ivar_name = None
             for i in exp['iterations']:
                 try:
-                    redY[e, i] = exp['iterations'][i]['Red_camera_dataY']
-                    FORTY[e, i] = exp['iterations'][i]['FORT_camera_dataY']
-                    redX[e, i] = exp['iterations'][i]['Red_camera_dataX']
-                    FORTY[e, i] = exp['iterations'][i]['FORT_camera_dataX']
                     retention[e, i] = exp['iterations'][i]['retention'][shot]
                     loading[e, i] = exp['iterations'][i]['loading']
                     err[e, i] = exp['iterations'][i]['retention_err'][shot]
@@ -444,23 +439,32 @@ class QDP:
         if hbins < 1:
             hbins = range(int(np.max(shot_data))+1)
         hist, bin_edges = np.histogram(shot_data, bins=hbins, normed=True)
+        
+        # define deafult parameters in the case of an exception
+        popt = np.array([])
+        pcov = np.array([])
+        cut = [np.nan]  # [intersection(*guess)]
+        rload = np.nan  # frac(*guess)
         try:
             # popt, pcov = optimize.curve_fit(dblgauss, bin_edges[:-1], hist, p0=guess)
-            popt, pcov = optimize.curve_fit(dblpoisson, bin_edges[:-1], hist, p0=guess, bounds=[(0,0,0),(1, np.inf ,np.inf)])
+            popt, pcov = optimize.curve_fit(
+                dblpoisson, 
+                bin_edges[:-1], 
+                hist, 
+                p0=guess, 
+                bounds=[(0,0,0),(1, np.inf ,np.inf)]
+            )
             cut = [intersection('poissonian', popt)]
             rload = frac(popt)
         except RuntimeError:
-            popt = np.array([])
-            pcov = np.array([])
-            cut = [np.nan]  # [intersection(*guess)]
-            rload = np.nan  # frac(*guess)
+            print("Unable to fit data")
         except TypeError as e:
             print(e)
             print("There may not be enough data for a fit. ( {} x {} )".format(len(bin_edges)-1, len(hist)))
-            popt = np.array([])
-            pcov = np.array([])
-            cut = [np.nan]
-            rload = np.nan
+        except ValueError as e:
+            print(e)
+            print('There may be some issue with your guess: `{}`'.format(guess))
+
         return {
             'hist_x': bin_edges[:-1],
             'hist_y': hist,
@@ -506,6 +510,7 @@ class QDP:
         if not filepath:
             filepath = default_exp(self.base_data_path)
         full_path = os.path.join(self.base_data_path, filepath)
+        print('data at: {}'.format(filepath))
         new_experiments = self.load_hdf5_file(full_path)
         self.experiments += new_experiments
 
