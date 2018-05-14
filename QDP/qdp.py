@@ -9,6 +9,7 @@ import json
 import ivar
 import datetime
 from scipy.stats import poisson
+import traceback
 
 
 def default_exp(dp):
@@ -33,14 +34,15 @@ def intersection(ftype, fparams):
     """Returns the minimum overlap of two distributions"""
     if ftype == 'gaussian':
         A1, m0, m1, s0, s1 = fparams
-        return (m1*s0**2-m0*s1**2-np.sqrt(s0**2*s1**2*(m0**2-2*m0*m1+m1**2+2*np.log((1-A1)/A1)*(s1**2-s0**2))))/(s0**2-s1**2)
+        return ((m1+m0)*s0**2-m0*s1**2-np.sqrt(s0**2*s1**2*(m0**2-2*m0*(m1+m0)+(m1+m0)**2+2*np.log((1-A1)/A1)*(s1**2-s0**2))))/(s0**2-s1**2)
     if ftype == 'poissonian':
-        A1, m0, m1 = fparams
+        print(fparams)
+        A1, m0, m1 = fparams[:3]
         A1_min = 0.1  # set cuts assuming at least 10 percent loading
         if A1 < A1_min:
             A1 = A1_min
-        for s in range(int(m1)):
-            if (1-A1)*poisson.pmf(s, m0) < A1*poisson.pmf(s, m1):
+        for s in xrange(int(m0), int(m0+m1)):
+            if (1-A1)*poisson.pmf(s, m0) < A1*poisson.pmf(s, m0+m1):
                 return s
 
 
@@ -51,8 +53,8 @@ def area(A1, m0, m1, s0, s1):
 # Normed Overlap for arbitrary cut point
 def overlap(xc, A1, m0, m1, s0, s1):
     err0 = (1-A1)*np.sqrt(np.pi/2)*s0*(1-special.erf((xc-m0)/np.sqrt(2)/s0))
-    err1 = A1*np.sqrt(np.pi/2)*s1*(special.erf((xc-m1)/np.sqrt(2)/s1)+special.erf(m1/np.sqrt(2)/s1))
-    return (err0+err1)/area(A1, m0, m1, s0, s1)
+    err1 = A1*np.sqrt(np.pi/2)*s1*(special.erf((xc-(m1+m0))/np.sqrt(2)/s1)+special.erf((m1+m0)/np.sqrt(2)/s1))
+    return (err0+err1)/area(A1, m0, m1+m0, s0, s1)
 
 
 # Relative Fraction in 1
@@ -61,11 +63,37 @@ def frac(fparams):
 
 
 def dblgauss(x, A1, m0, m1, s0, s1):
-    return (1-A1)*np.exp(-(x-m0)**2 / (2*s0**2))/np.sqrt(2*np.pi*s0**2) + A1*np.exp(-(x-m1)**2 / (2*s1**2))/np.sqrt(2*np.pi*s1**2)
+    return (1-A1)*np.exp(-(x-m0)**2 / (2*s0**2))/np.sqrt(2*np.pi*s0**2) + A1*np.exp(-(x-m1-m0)**2 / (2*s1**2))/np.sqrt(2*np.pi*s1**2)
+
+
+def poisson_pdf(x, mu):
+    """Continuous approximmation of the Poisson PMF to prevent failures from non-integer bin edges"""
+    # large values of x will cause overflow, so use gaussian instead
+    result = np.power(float(mu), x)*np.exp(-float(mu))/special.gamma(x+1)
+    nans = np.argwhere(np.logical_or(np.isnan(result), np.isinf(result)))
+    result[nans] = np.exp(-(x[nans]-mu)**2 / (2*np.sqrt(mu)**2))/np.sqrt(2*np.pi*np.sqrt(mu)**2)
+    return result
 
 
 def dblpoisson(x, A1, m0, m1):
-    return (1-A1)*poisson.pmf(x, m0) + A1*poisson.pmf(x, m1)
+    result = (1-A1)*poisson_pdf(x, m0) + A1*poisson_pdf(x, m0 + m1)
+    # print(result)
+    return result
+
+
+def dblpoissonloss(x, A1, m0, m1, a, t):
+    res0 = (1-A1)*poisson_pdf(x, m0*t)
+    res1 = A1*(np.exp(-a*t)*poisson_pdf(x, (m0+m1)*t) + (1-np.exp(-a*t))*poissonloss(x, m0, m1, a, t))
+    return res0 + res1
+
+
+def poissonloss(x, m0, m1, a, t):
+    """Normalized single-body loss readout model for the loss signal, loss rate is a, exposure time is t"""
+    A = (a/((1-np.exp(-a*t))*special.factorial(x, exact=False)))
+    A *= np.exp(float(m0*a*t)/m1)*np.power(float(m1), x)*np.power(float(a+m1),-x-1)
+    B = special.gammaincc(x+1, float(t*(a+m1)*m0)/m1)*special.gamma(x+1)
+    B -= special.gammaincc(x+1, t*(a+m1)*(1+float(m0)/m1))*special.gamma(x+1)
+    return A*B
 
 
 def get_iteration_variables(h5file, iterations):
@@ -95,7 +123,7 @@ def binomial_error(ns, n):
         if np.any(ns[r] == n[r].astype('int')):
             ns[ns[r] == n[r].astype('int')] = n[r]-0.5
         if np.any(n[r] == 0):
-            print("no loading observed")
+            # print("no loading observed")
             errs[r] = np.full_like(ns[r], np.nan)
         else:
             try:
@@ -410,7 +438,7 @@ class QDP:
     def get_thresholds(self):
         return self.cuts
 
-    def fit_distribution(self, shot_data, r, s, max_atoms=1, hbins=0, guesses=None):
+    def fit_distribution(self, shot_data, r, s, t_ex, max_atoms=1, hbins=0, guesses=None, loss=True, method='poisson'):
         cut = np.nan
         try:
             guess = guesses[r][s]
@@ -423,15 +451,21 @@ class QDP:
             guess = []
             for n in range(max_atoms+1):
                 idx = indicies[n]
-#                 guess.append([
-#                     gmix.weights_[idx],  # amplitudes
-#                     gmix.means_.flatten()[idx],  # x0s
-#                     np.sqrt(gmix.means_.flatten()[idx])  # sigmas
-#                 ])
-                guess.append([
-                    gmix.weights_[idx],  # amplitudes
-                    gmix.means_.flatten()[idx]  # x0s
-                ])
+                if method=='poisson':
+                    guess.append([
+                        gmix.weights_[idx],  # amplitudes
+                        gmix.means_.flatten()[idx]
+                    ])
+                    if idx != indicies[0]:
+                        # subtract off backgrounds
+                        guess[-1][-1] -= gmix.means_.flatten()[indicies[0]]
+                else:
+                    # gaussian
+                    guess.append([
+                        gmix.weights_[idx],  # amplitudes
+                        gmix.means_.flatten()[idx] - (indicies[idx] > 0 if gmix.means_.flatten()[indicies[0]] else 0),  # x0s
+                        np.sqrt(gmix.means_.flatten()[idx])  # sigmas
+                    ])
 
             # reorder the parameters, drop the 0 atom amplitude
             guess = np.transpose(guess).flatten()[1:]
@@ -445,27 +479,44 @@ class QDP:
         pcov = np.array([])
         cut = [np.nan]  # [intersection(*guess)]
         rload = np.nan  # frac(*guess)
+        function = None
+        success = False
+        print(s,r)
         try:
-            # popt, pcov = optimize.curve_fit(dblgauss, bin_edges[:-1], hist, p0=guess)
-            popt, pcov = optimize.curve_fit(
-                dblpoisson, 
-                bin_edges[:-1], 
-                hist, 
-                p0=guess, 
-                bounds=[(0,0,0),(1, np.inf ,np.inf)]
-            )
-            cut = [intersection('poissonian', popt)]
+            if method=='poisson':
+                popt, pcov = optimize.curve_fit(
+                    dblpoisson, 
+                    bin_edges[:-1], 
+                    hist, 
+                    p0=guess, 
+                    bounds=[(0,0,0),(1, np.inf ,np.inf)]
+                )
+                cut = [intersection('poissonian', popt)]
+                function = dblpoisson
+            else:
+                popt, pcov = optimize.curve_fit(
+                    dblgauss,
+                    bin_edges[:-1],
+                    hist,
+                    p0=guess,
+                    bounds=[(0, 0, 0, 0, 0),(1, np.inf, np.inf, np.inf, np.inf)]
+                )
+                cut = [intersection('gaussian', popt)]
+                function = dblgauss
+            
             rload = frac(popt)
+            success = True
         except RuntimeError:
             print("Unable to fit data")
         except TypeError as e:
             print(e)
             print("There may not be enough data for a fit. ( {} x {} )".format(len(bin_edges)-1, len(hist)))
         except ValueError as e:
-            print(e)
-            print('There may be some issue with your guess: `{}`'.format(guess))
+            if s != 2:
+                print(e)
+                print('There may be some issue with your guess: `{}`'.format(guess))
 
-        return {
+        result = {
             'hist_x': bin_edges[:-1],
             'hist_y': hist,
             'max_atoms': max_atoms,
@@ -474,7 +525,59 @@ class QDP:
             'cuts': cut,
             'guess': guess,
             'rload': rload,
+            'function': function,
+            't_ex': t_ex[s]
         }
+        print("cuts: {}".format(result['cuts']))
+         
+        if loss and success and s != 2:
+            print('initial fit succeeded with parameters: {}'.format(result['fit_params']))
+            # will overwrite results contents on success
+            self.fit_loss(result, method)
+        return result
+    
+    def fit_loss(self, result, method):
+        """Fits a lossy readout model"""
+        old_guess = result['fit_params']
+        t_ex = result['t_ex']
+        if method == 'poisson':
+            new_guess = [old_guess[0], old_guess[1]/t_ex, (old_guess[2]-old_guess[1])/t_ex, 0.1/t_ex]
+        else:
+            new_guess = [
+                old_guess[0],
+                old_guess[1]/t_ex,
+                (old_guess[2]-old_guess[1])/t_ex,
+                # add sigmas
+                0.1/t_ex
+            ]
+        try:
+            # popt, pcov = optimize.curve_fit(dblgauss, bin_edges[:-1], hist, p0=guess)
+            popt, pcov = optimize.curve_fit(
+                lambda x, a1, m0, m1, a: dblpoissonloss(x, a1, m0, m1, a, t_ex), 
+                result['hist_x'], 
+                result['hist_y'], 
+                p0=new_guess, 
+                bounds=[(0,0,0,0),(1, np.inf, np.inf, np.inf)]
+            )
+            new_guess.append(t_ex)
+            result['cuts'] = [intersection('poissonian', popt)]
+            result['rload'] = frac(popt)
+            result['guess'] = new_guess
+            result['fit_params'] = np.append(popt, t_ex)
+            result['fit_cov'] = pcov
+            result['function'] = dblpoissonloss
+        except RuntimeError:
+            print("Unable to fit data")
+        except ValueError as e:
+            print(e)
+            print('There may be some issue with your guess: `{}`'.format(new_guess))
+            traceback.print_exc()
+            
+    def get_readout_times(self, exp, itr):
+        """Should be overriden for different experiments"""
+        t_ex1 = self.experiments[exp]['iterations'][itr]['variables']['readout_780']
+        t_ex0 = t_ex1 + self.experiments[exp]['iterations'][itr]['variables']['exra_readout_780']
+        return [t_ex0, t_ex1]
 
     def generate_thresholds(self, save_cuts=True, exp=0, itr=0, **kwargs):
         """Find the optimal thresholds for quantization of the data."""
@@ -492,7 +595,8 @@ class QDP:
             for s in range(shots):
                 # stored format is (sub_measurement, shot, roi, 1)
                 shot_data = self.experiments[exp]['iterations'][itr]['signal_data'][:, s, r, 0]
-                ret_val[r].append(self.fit_distribution(shot_data, r, s, **kwargs))
+                t_ex = self.get_readout_times(exp, itr)
+                ret_val[r].append(self.fit_distribution(shot_data, r, s, t_ex, **kwargs))
                 cuts.append(ret_val[r][-1]['cuts'])
                 self.rload[r][s] = ret_val[r][-1]['rload']
             self.set_thresholds(cuts, roi=r)
