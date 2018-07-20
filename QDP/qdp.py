@@ -36,7 +36,7 @@ def intersection(ftype, fparams):
         A1, m0, m1, s0, s1 = fparams
         return ((m1+m0)*s0**2-m0*s1**2-np.sqrt(s0**2*s1**2*(m0**2-2*m0*(m1+m0)+(m1+m0)**2+2*np.log((1-A1)/A1)*(s1**2-s0**2))))/(s0**2-s1**2)
     if ftype == 'poissonian':
-        print(fparams)
+        # print(fparams)
         A1, m0, m1 = fparams[:3]
         A1_min = 0.1  # set cuts assuming at least 10 percent loading
         if A1 < A1_min:
@@ -456,16 +456,16 @@ class QDP:
                         gmix.weights_[idx],  # amplitudes
                         gmix.means_.flatten()[idx]
                     ])
-                    if idx != indicies[0]:
-                        # subtract off backgrounds
-                        guess[-1][-1] -= gmix.means_.flatten()[indicies[0]]
                 else:
                     # gaussian
                     guess.append([
                         gmix.weights_[idx],  # amplitudes
-                        gmix.means_.flatten()[idx] - (indicies[idx] > 0 if gmix.means_.flatten()[indicies[0]] else 0),  # x0s
+                        gmix.means_.flatten()[idx],  # x0s
                         np.sqrt(gmix.means_.flatten()[idx])  # sigmas
                     ])
+                if idx != indicies[0]:
+                    # subtract off backgrounds
+                    guess[-1][1] -= gmix.means_.flatten()[indicies[0]]
 
             # reorder the parameters, drop the 0 atom amplitude
             guess = np.transpose(guess).flatten()[1:]
@@ -481,7 +481,7 @@ class QDP:
         rload = np.nan  # frac(*guess)
         function = None
         success = False
-        print(s,r)
+        # print(s,r)
         try:
             if method=='poisson':
                 popt, pcov = optimize.curve_fit(
@@ -489,7 +489,7 @@ class QDP:
                     bin_edges[:-1], 
                     hist, 
                     p0=guess, 
-                    bounds=[(0,0,0),(1, np.inf ,np.inf)]
+                    bounds=[(0,0,0), (1, np.inf ,np.inf)]
                 )
                 cut = [intersection('poissonian', popt)]
                 function = dblpoisson
@@ -499,7 +499,7 @@ class QDP:
                     bin_edges[:-1],
                     hist,
                     p0=guess,
-                    bounds=[(0, 0, 0, 0, 0),(1, np.inf, np.inf, np.inf, np.inf)]
+                    bounds=[(0, 0, 0, 0, 0), (1, np.inf, np.inf, np.inf, np.inf)]
                 )
                 cut = [intersection('gaussian', popt)]
                 function = dblgauss
@@ -528,42 +528,54 @@ class QDP:
             'function': function,
             't_ex': t_ex[s]
         }
-        print("cuts: {}".format(result['cuts']))
+        # print("cuts: {}".format(result['cuts']))
          
         if loss and success and s != 2:
             print('initial fit succeeded with parameters: {}'.format(result['fit_params']))
             # will overwrite results contents on success
             self.fit_loss(result, method)
+        print('-'*20)
         return result
     
     def fit_loss(self, result, method):
         """Fits a lossy readout model"""
         old_guess = result['fit_params']
         t_ex = result['t_ex']
-        if method == 'poisson':
-            new_guess = [old_guess[0], old_guess[1]/t_ex, (old_guess[2]-old_guess[1])/t_ex, 0.1/t_ex]
-        else:
-            new_guess = [
-                old_guess[0],
-                old_guess[1]/t_ex,
-                (old_guess[2]-old_guess[1])/t_ex,
-                # add sigmas
-                0.1/t_ex
+        m0 = old_guess[1]/t_ex
+        m1 = old_guess[2]/t_ex
+        new_guess = [old_guess[0]]
+        if method != 'poisson':
+            new_guess += [
+                old_guess[3]/np.sqrt(t_ex),
+                np.sqrt((old_guess[3]**2 - old_guess[4]**2)/t_ex)  # deconvolve background width from signal width
             ]
+        new_guess.append(0.1/t_ex)
         try:
-            # popt, pcov = optimize.curve_fit(dblgauss, bin_edges[:-1], hist, p0=guess)
-            popt, pcov = optimize.curve_fit(
-                lambda x, a1, m0, m1, a: dblpoissonloss(x, a1, m0, m1, a, t_ex), 
-                result['hist_x'], 
-                result['hist_y'], 
-                p0=new_guess, 
-                bounds=[(0,0,0,0),(1, np.inf, np.inf, np.inf)]
-            )
-            new_guess.append(t_ex)
+            if method == 'poisson':
+                popt, pcov = optimize.curve_fit(
+                    lambda x, a1, a: dblpoissonloss(x, a1, m0, m1, a, t_ex), 
+                    result['hist_x'], 
+                    result['hist_y'], 
+                    p0=new_guess, 
+                    bounds=[(0, 0),(1, np.inf)]
+                )
+            else:
+                popt, pcov = optimize.curve_fit(
+                    lambda x, a1, s0, s1, a: dblgaussianloss(x, a1, m0, m1, s0, s1, a, t_ex),
+                    bin_edges[:-1],
+                    hist,
+                    p0=guess
+                )
+            new_guess = [new_guess[0]] + [m0, m1] + new_guess[1:] + [t_ex]
+            temp = new_guess[:]
+            temp[0] = popt[0]
+            for i in range(len(popt[1:])):
+                temp[i+3] = popt[i+1]
+            popt = temp
             result['cuts'] = [intersection('poissonian', popt)]
             result['rload'] = frac(popt)
             result['guess'] = new_guess
-            result['fit_params'] = np.append(popt, t_ex)
+            result['fit_params'] = popt
             result['fit_cov'] = pcov
             result['function'] = dblpoissonloss
         except RuntimeError:
@@ -653,7 +665,10 @@ class QDP:
             }
             # step through iterations
             for i in e[1]['iterations/'].iteritems():
-                exp_data['iterations'][int(i[0])] = self.process_iteration(i[1])
+                try:
+                    exp_data['iterations'][int(i[0])] = self.process_iteration(i[1])
+                except ValueError:
+                    print("processing iteration {} failed likely due to not having any data.".format(int(i[0])))
             exps.append(exp_data)
         h5file.close()
         return exps
