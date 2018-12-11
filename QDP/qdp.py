@@ -112,11 +112,12 @@ def get_iteration_variables(h5file, iterations):
     return (i_vars, i_vars_desc)
 
 
-def binomial_error(ns, n):
+def binomial_error(nsp, n):
     """Normal approximation interval, see: https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval"""
     alpha = 1-0.682
     z = 1-0.5*alpha
-    errs = np.zeros_like(ns)
+    ns = np.copy(nsp).astype('float')
+    errs = np.zeros_like(ns, dtype='float')
     # if ns is 0 or n, then use ns = 0.5 or n - 0.5 for the error calculation so we dont get error = 0
     ns[ns == 0] = 0.5
     for r in range(len(n)):
@@ -232,9 +233,14 @@ class QDP:
         # set a data path to search from
         self.base_data_path = base_data_path
         # save current git hash
-        self.version = subprocess.check_output(['git', 'describe', '--always']).strip()
+        try:
+            self.version = subprocess.check_output(['git', 'describe', '--always']).strip()
+        except Exception as ee:
+            print(ee)
+            print('Warning: Unable to detect commit tag for repo')
+            self.version = ''
 
-    def apply_thresholds(self, cuts=None, exp='all', loading_shot=0, exclude_rois=[]):
+    def apply_thresholds(self, cuts=None, exp='all', loading_shot=0, exclude_rois=[], ncondition=0):
         """Digitize data with existing thresholds (default) or with supplied thresholds.
 
         digitization bins are right open, i.e. the condition  for x in bin i b[i-1] <= x < b[i]
@@ -253,7 +259,7 @@ class QDP:
                 meas, shots = e['iterations'][i]['signal_data'].shape[:2]
                 rois = e['iterations'][i]['signal_data'].shape[2]*e['iterations'][i]['signal_data'].shape[3]
                 # digitize the data
-                quant = np.empty((shots, rois, meas))
+                quant = np.zeros((shots, rois, meas), dtype='int8')
                 for r in range(rois):
                     if r not in exclude_rois:
                         for s in range(shots):
@@ -279,20 +285,61 @@ class QDP:
                                 quant[s, r]
                             ), axis=0)
                 loaded = np.copy(retention[loading_shot, :])
+                e['iterations'][i]['loaded'] = loaded
+                loaded_nzero = np.copy(loaded)
+                loaded_nzero[loaded_nzero == 0] = 1  # prevent runtime warning
 
                 retention[loading_shot, :] = 0.0
                 reloading[loading_shot, :] = 0.0
                 # print retention/loaded
                 e['iterations'][i]['loading'] = loaded/meas
-                e['iterations'][i]['retention'] = retention/loaded
+                e['iterations'][i]['retention'] = retention/loaded_nzero
                 try:
-                    e['iterations'][i]['retention_err'] = binomial_error(retention, loaded)
-                except:
                     e['iterations'][i]['retention_err'] = binomial_error(retention[1], loaded)
-                e['iterations'][i]['loaded'] = loaded
+                except Exception as ee:
+                    print("binomial error calculation failed")
+                    print(ee)
                 e['iterations'][i]['reloading'] = reloading.astype('float')/(meas-loaded)
 
+        if ncondition > 0:
+            self.calculate_n_roi_ret(loading_shot=loading_shot, exclude_rois=exclude_rois, n=ncondition)
         return self.get_retention()
+    
+    def calculate_n_roi_ret(self, loading_shot=0, exclude_rois=[], n=1):
+        """Calculates the retention when at most n rois are loaded.
+        
+        fills in:
+            experiments['iterations'][i]['conditional_retention']
+        and 
+            experiments['iterations'][i]['conditional_retention_err']
+        """
+        ls = loading_shot
+        ecnt = 0
+        for e in self.experiments:
+            ecnt += 1
+            for i in e['iterations']:
+                # (meas, shots, rois)
+                meas, shots, rois = e['iterations'][i]['quantized_data'].shape
+                loads = np.sum(e['iterations'][i]['quantized_data'][:,ls,:], axis=1)
+                # get all events with loading between 1 and n atoms
+                ltn_load_events = e['iterations'][i]['quantized_data'][(loads>0) & (loads<n+1)].astype('int')
+                # now do the retention
+                roi_loads = np.sum(ltn_load_events[:,ls,:], axis=0)
+                no_loads = roi_loads == 0
+                roi_loads[no_loads] = 1  # to prevent the runtime warning
+                retention = np.empty((shots, rois))
+                retained = np.empty((shots, rois), dtype='int')
+                for s in range(ltn_load_events.shape[1]):
+                    retained[s] = np.sum(ltn_load_events[:,ls,:] & ltn_load_events[:,s,:], axis=0)
+                    retention[s] = retained[s].astype('float')/roi_loads
+                e['iterations'][i]['conditional_retention'] = retention
+                retention[ls, :] = 0.0
+                try:
+                    e['iterations'][i]['conditional_retention_err'] = binomial_error(retained[1], roi_loads)
+                except Exception as ee:
+                    print("binomial error calculation failed")
+                    print(ee)
+                
 
     def format_counter_data(self, array, shots, drops, bins):
         """Formats raw 2D counter data into the required 4D format.
@@ -361,6 +408,10 @@ class QDP:
         redY = np.empty_like(retention)
         FORTY = np.empty_like(retention)
         loading = np.empty_like(retention)
+        # conditional retention (see calculate_n_roi_ret())
+        cond_ret = np.empty_like(retention)
+        cond_ret_err = np.empty_like(retention)
+
         for e, exp in enumerate(self.experiments):
             if len(exp['variable_list']) > 1:
                 r = self.experiments[0]['iterations'][0]['signal_data'].shape[3]
@@ -384,6 +435,11 @@ class QDP:
                                 ivar[e, i, j] = 0
                         except IndexError:
                             print "error reading (e,i): ({},{})".format(e, i)
+                        try:
+                            cond_ret[e,i] = exp['iterations'][i]['conditional_retention'][shot]
+                            cond_ret_err[e,i] = exp['iterations'][i]['conditional_retention_err'][shot]
+                        except KeyError:
+                            print('Could not find conditional retention')
                     # if numpy format is requested return it
                         # print retention
                 if fmt == 'numpy' or fmt == 'np':
@@ -394,6 +450,8 @@ class QDP:
                     return {
                         'retention': retention,
                         'loading': loading,
+                        'conditional_retention': cond_ret,
+                        'conditional_retention_err': cond_ret_err,
                         'error': err,
                         'ivar': ivar,
                         'redX': redX,
@@ -418,6 +476,11 @@ class QDP:
                         ivar[e, i] = 0
                 except IndexError:
                     print("error reading (e,i): ({},{})".format(e, i))
+                try:
+                    cond_ret[e,i] = exp['iterations'][i]['conditional_retention'][shot]
+                    cond_ret_err[e,i] = exp['iterations'][i]['conditional_retention_err'][shot]
+                except KeyError:
+                    print('Could not find conditional retention')
         # if numpy format is requested return it
         # print retention
         if fmt == 'numpy' or fmt == 'np':
@@ -427,6 +490,8 @@ class QDP:
             return {
                 'retention': retention,
                 'loading': loading,
+                'conditional_retention': cond_ret,
+                'conditional_retention_err': cond_ret_err,
                 'error': err,
                 'ivar': ivar,
                 'redX': redX,

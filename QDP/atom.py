@@ -2,7 +2,7 @@ import numpy as np
 from scipy import constants
 
 
-def release_recapture(drop, T_uk, U_mk, wr_um, zr_um, fr_khz, fa_khz, gravity=True, n=100, m_au=86.909):
+def release_recapture(drop, T_uk, U_mk, wr_um, zr_um, fr_khz, fa_khz, gravity=True, n=100, m_au=86.909, allow_untrapped_i=False):
     """A monte carlo implementation of a release and recapture experiment.
 
     See: C. Tuchendler et al. Phys. Rev. A 78, 033425 (2008)
@@ -51,8 +51,11 @@ def release_recapture(drop, T_uk, U_mk, wr_um, zr_um, fr_khz, fa_khz, gravity=Tr
     else:
         KE_f = KE
 
-    # only consider initial states that were trapped
-    trapped_i = (PE_i + KE) < 0.0
+    if allow_untrapped_i:
+        trapped_i = np.full(PE_i.shape, True)
+    else:
+        # only consider initial states that were trapped
+        trapped_i = (PE_i + KE) < 0.0
     trapped_f = (PE_f + KE_f) < 0.0
 
     # measure probability of remaining trapped
