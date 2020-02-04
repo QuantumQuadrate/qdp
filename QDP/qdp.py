@@ -828,8 +828,8 @@ class QDP:
         meas_bins = variables['measurement_bins']
         array = measurement['data/counter/data'].value
         total_shots = array.shape[1]/(drop_bins + meas_bins)
-        if total_shots > 2:
-            print("Possibly too many shots, analysis might need to be updated")
+        #if total_shots > 2:
+            #print("Possibly too many shots, analysis might need to be updated")
         return self.format_counter_data(array, total_shots, drop_bins, meas_bins)
 
     def process_analyzed_camera_data(self, measurement, variables):
